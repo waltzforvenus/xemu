@@ -13,6 +13,7 @@ specific_ss.add(files(
 	'xbox.c',
 	'xbox_pci.c',
 	'xid.c',
+	'modchip_xenium.c'
 	))
 subdir('nv2a')
 subdir('mcpx')
