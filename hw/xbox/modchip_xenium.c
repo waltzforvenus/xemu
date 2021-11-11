@@ -56,7 +56,7 @@ typedef struct XeniumBank {
 
 static const XeniumBank_t XeniumBank[11] = 
 {
-    {0, 1024 * 1024},       //TSOP
+    {0, 1 * 1024 * 1024},   //TSOP
     {0x180000, 256 * 1024}, //Bootloader
     {0x100000, 512 * 1024}, //XeniumOS
     {0x000000, 256 * 1024}, //Bank 1 256k
@@ -71,6 +71,7 @@ static const XeniumBank_t XeniumBank[11] =
 
 typedef struct XeniumState {
     ISADevice dev;
+    SysBusDevice dev_sysbus;
     MemoryRegion io;
     MemoryRegion flash_mem;
 
@@ -181,14 +182,14 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
     //1: memory_region_rom_device_set_romd(&s->flash_mem, false);
     //2: Handle chip erase, sector erase etc.
     //3: Handle responses in flash_read callback
-    DPRINTF("%s offset: %08x value: %lld size: %d\n", __FUNCTION__, (uint32_t)offset, value, size);
+    DPRINTF("%s offset: %08x value: %02x size: %d\n", __FUNCTION__, (uint32_t)offset, (uint8_t)value, size);
 }
 
 static const MemoryRegionOps xenium_flash_ops = {
     .read = flash_read,
     .write = flash_write,
-    .valid.min_access_size = 4, //FIXME?
-    .valid.max_access_size = 4, //FIXME?
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -248,18 +249,17 @@ static void xenium_realize(DeviceState *dev, Error **errp)
         assert(mr_bios != NULL);
         memory_region_init_alias(mr_bios, NULL, "xenium.bios.alias", &s->flash_mem, 0, XENIUM_MAX_BANK_SIZE);
         memory_region_add_subregion(rom_memory__, map_loc, mr_bios);
-        memory_region_set_readonly(mr_bios, false);
     }
 
     //Add MCPX memory and alias it to 0xFFFFFE00 in Xbox memory
     MemoryRegion *mr_mcpx = g_malloc(sizeof(MemoryRegion));
-    memory_region_init_ram(mr_mcpx, NULL, "xbox.mcpx", MCPX_SIZE, &err); //Should prob use ROM
+    memory_region_init_ram(mr_mcpx, NULL, "xbox.mcpx", flash_size, &err);
     void *mcpx_data = memory_region_get_ram_ptr(mr_mcpx);
-    memcpy(mcpx_data, mcpx_raw, MCPX_SIZE);
+    memcpy(mcpx_data, flash_mem, flash_size);
+    memcpy(mcpx_data + flash_size - MCPX_SIZE, mcpx_raw, MCPX_SIZE);
     MemoryRegion *mr_mcpx_alias = g_malloc(sizeof(MemoryRegion));
-    memory_region_init_alias(mr_mcpx_alias, NULL, "xbox.mcpx.alias", mr_mcpx, 0, MCPX_SIZE);
-    memory_region_add_subregion(rom_memory__, 0xFFFFFE00, mr_mcpx_alias);
-    memory_region_set_readonly(mr_mcpx_alias, true);
+    memory_region_init_alias(mr_mcpx_alias, NULL, "xbox.mcpx.alias", mr_mcpx, 0, flash_size);
+    memory_region_add_subregion(rom_memory__, -flash_size, mr_mcpx_alias);
 
     //Register Xenium Chip IO
     memory_region_init_io(&s->io, OBJECT(s), &xenium_io_ops, s, "xenium.io", 2);   // 0xEE & 0xEF
