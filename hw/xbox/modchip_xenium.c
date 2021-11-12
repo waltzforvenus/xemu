@@ -41,6 +41,8 @@
 # define DPRINTF(format, ...) do { } while (0)
 #endif
 
+#define XENIUM_FLASH_MANUF_ID (0x01)
+#define XENIUM_FLASH_DEV_ID (0xC4)
 #define XENIUM_FLASH_SIZE (2 * 1024 * 1024)
 #define XENIUM_MAX_BANK_SIZE (1024 * 1024)
 #define MCPX_SIZE (512)
@@ -91,7 +93,8 @@ uint8_t XeniumFlashCFI[] = {
 
 typedef enum {
     XENIUM_MEMORY_STATE_NORMAL,
-    XENIUM_MEMORY_STATE_CFI
+    XENIUM_MEMORY_STATE_CFI,
+    XENIUM_MEMORY_STATE_AUTOSELECT,
 } XeniumMemoryState;
 
 typedef struct XeniumState {
@@ -113,6 +116,7 @@ typedef struct XeniumState {
     bool recovery;  // 0 is active
 
     XeniumMemoryState flash_state;
+    unsigned char flash_cycle;
 } XeniumState;
 
 #define XENIUM_DEVICE(obj) \
@@ -202,6 +206,18 @@ static uint64_t flash_read(void *opaque, hwaddr offset, unsigned size)
         return XeniumFlashCFI[(size == 1 ? offset : offset << 1) % sizeof(XeniumFlashCFI)];
     }
 
+    if(s->flash_state == XENIUM_MEMORY_STATE_AUTOSELECT) {
+        switch (offset) {
+            case 0:
+                DPRINTF("%s Sending Manufacturer ID %02x\n", __FUNCTION__, XENIUM_FLASH_MANUF_ID);
+                return XENIUM_FLASH_MANUF_ID;
+            case 2:
+                DPRINTF("%s Sending Device ID %02x\n", __FUNCTION__, XENIUM_FLASH_DEV_ID);
+                return XENIUM_FLASH_DEV_ID;
+        }
+        DPRINTF("%s Invalid Chip ID offset: %08x\n", __FUNCTION__, (uint32_t)offset);
+    }
+
     return 0;
 }
 
@@ -215,21 +231,54 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
     //1: memory_region_rom_device_set_romd(&s->flash_mem, false);
     //2: Handle chip erase, sector erase etc.
     //3: Handle responses in flash_read callback
-    DPRINTF("%s offset: %08x value: %02x size: %d\n", __FUNCTION__, (uint32_t)offset, (uint8_t)value, size);
+    DPRINTF("%s offset: %08x value: %02x size: %d, cycle: %d\n", __FUNCTION__, (uint32_t)offset, (uint8_t)value, size, s->flash_cycle);
 
     // Reset
     if(offset == 0x00 && value == 0xF0 && size == 1) {
         DPRINTF("%s Flash Reset (Entering Normal flash state)\n", __FUNCTION__);
 
         s->flash_state = XENIUM_MEMORY_STATE_NORMAL;
+        s->flash_cycle = 1;
         memory_region_rom_device_set_romd(&s->flash_mem, true);
+        return;
     }
-    // Enter CFI Mode
-    else if(offset == 0xAA && value == 0x98 && size == 1) {
-        DPRINTF("%s Entering CFI Mode flash state\n", __FUNCTION__);
 
-        s->flash_state = XENIUM_MEMORY_STATE_CFI;
-        memory_region_rom_device_set_romd(&s->flash_mem, false);
+    switch (s->flash_cycle)
+    {
+        case 1:
+            // Enter CFI Mode
+            if(offset == 0xAA && value == 0x98 && size == 1) {
+                DPRINTF("%s Entering CFI Mode flash state\n", __FUNCTION__);
+
+                s->flash_state = XENIUM_MEMORY_STATE_CFI;
+                memory_region_rom_device_set_romd(&s->flash_mem, false);
+            }
+            else if(offset == 0xAAAA && value == 0xAA && size == 1) {
+                s->flash_cycle++;
+            }
+            else {
+                DPRINTF("%s Unimplemented Flash command\n", __FUNCTION__);
+            }
+            break;
+        case 2:
+            if(offset == 0x5555 && value == 0x55 && size == 1) {
+                s->flash_cycle++;
+            }
+            else {
+                DPRINTF("%s Unimplemented Flash command\n", __FUNCTION__);
+            }
+            break;
+        case 3:
+            if(offset == 0xAAAA && value == 0x90 && size == 1) {
+                DPRINTF("%s Entering Autoselect Mode flash state\n", __FUNCTION__);
+
+                s->flash_state = XENIUM_MEMORY_STATE_AUTOSELECT;
+                memory_region_rom_device_set_romd(&s->flash_mem, false);
+            }
+            else {
+                DPRINTF("%s Unimplemented Flash command\n", __FUNCTION__);
+            }
+            break;
     }
 }
 
@@ -274,6 +323,7 @@ static void xenium_realize(DeviceState *dev, Error **errp)
     s->recovery = 1;        // inactive
     s->led = 1;             // red
     s->flash_state = XENIUM_MEMORY_STATE_NORMAL; // Default flash state
+    s->flash_cycle = 1;
 
     //Create a ROM device for the Xenuim Flash
     unsigned int flash_size = XeniumBank[s->bank_control].size;
