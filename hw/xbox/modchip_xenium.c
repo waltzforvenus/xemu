@@ -115,6 +115,7 @@ typedef struct XeniumState {
 
     bool recovery;  // 0 is active
 
+    char *rom_file;
     XeniumMemoryState flash_state;
     unsigned char flash_cycle;
 } XeniumState;
@@ -297,7 +298,7 @@ static void xenium_realize(DeviceState *dev, Error **errp)
     Error *err = NULL;
 
     //Read Xenium Flash Dump (2MB file)
-    int fd = qemu_open("D:/xenium_flash.bin", O_RDONLY | O_BINARY, NULL);
+    int fd = qemu_open(s->rom_file, O_RDONLY | O_BINARY, NULL);
     assert(fd >= 0);
     read(fd, xenium_raw, XENIUM_FLASH_SIZE);
     close(fd);
@@ -366,6 +367,7 @@ static void xenium_realize(DeviceState *dev, Error **errp)
 }
 
 static Property xenium_properties[] = {
+    DEFINE_PROP_STRING("rom-path", XeniumState, rom_file),
     DEFINE_PROP_END_OF_LIST(),
 };
 
