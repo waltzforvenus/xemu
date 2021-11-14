@@ -47,7 +47,8 @@
 #define XENIUM_MAX_BANK_SIZE (1024 * 1024)
 #define MCPX_SIZE (512)
 
-extern MemoryRegion *rom_memory__;
+extern MemoryRegion *rom_memory__; //FIXME
+
 uint8_t xenium_raw[XENIUM_FLASH_SIZE];
 uint8_t mcpx_raw[MCPX_SIZE];
 
@@ -72,7 +73,7 @@ static const XeniumBank_t XeniumBank[11] =
 };
 
 // Dumped using this script https://gist.github.com/LoveMHz/8c20b0bb7fcd88588a1740657396075c
-uint8_t XeniumFlashCFI[] = {
+static const uint8_t XeniumFlashCFI[] = {
     /* 00h */ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     /* 10h */ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     /* 20h */ 0x51, 0x51, 0x52, 0x52, 0x59, 0x59, 0x02, 0x02, 0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x00, 0x00,
@@ -148,13 +149,6 @@ static void xenium_io_write(void *opaque, hwaddr addr, uint64_t val,
                                                                           XeniumBank[s->bank_control].offset,
                                                                           flash_size);
 
-            //We're on a new bank, so copy the flash data from this bank into our ROM device.
-            void *flash_mem = memory_region_get_ram_ptr(&s->flash_mem);
-            for (int i = 0; i < XENIUM_MAX_BANK_SIZE; i += flash_size)
-            {
-                memcpy(flash_mem + i, xenium_raw + XeniumBank[s->bank_control].offset, flash_size);
-            }
-            memory_region_flush_rom_device(&s->flash_mem, 0, XENIUM_MAX_BANK_SIZE);
         break;
         default: assert(false);
     }
@@ -195,12 +189,30 @@ static const MemoryRegionOps xenium_io_ops = {
 
 static uint64_t flash_read(void *opaque, hwaddr offset, unsigned size)
 {
-    //FIXME: If flash_write has had the write sequences, we should be in MMIO mode. So this callback should get called
-    //for flash reads.
-    //Handle flash ID (Manuf and chip ID)
-    //Busy flags?
-    //When finished put back in ROMD mode memory_region_rom_device_set_romd(&s->flash_mem, true);
     XeniumState *s = opaque;
+    if(s->flash_state == XENIUM_MEMORY_STATE_NORMAL) {
+        //Handle mirroring
+        offset %= XeniumBank[s->bank_control].size;
+        //Handle banking
+        offset |= XeniumBank[s->bank_control].offset;
+        if (size == 1) {
+            uint8_t *flash_mem = (uint8_t *)xenium_raw;
+            return flash_mem[offset];
+        }
+        else if (size == 2) {
+            uint16_t *flash_mem = (uint16_t *)xenium_raw;
+            return flash_mem[offset/2];
+        }
+        else if (size == 4) {
+            uint32_t *flash_mem = (uint32_t *)xenium_raw;
+            return flash_mem[offset/4];
+        }
+        else {
+            DPRINTF("%s Unsupported read len %d\n", __FUNCTION__, size);
+            assert(0);
+        }
+    }
+
     DPRINTF("%s offset: %08x size: %d\n", __FUNCTION__, (uint32_t)offset, size);
 
     if(s->flash_state == XENIUM_MEMORY_STATE_CFI) {
@@ -227,11 +239,6 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
 {
     XeniumState *s = opaque;
 
-    //FIXME: I think here we check all the flash write commands, if they match the right sequence we need to disable ROMD mode (MMIO mode),
-    //and then handle flash responses in the flash_read callback (flash busy, flash ID etc)
-    //1: memory_region_rom_device_set_romd(&s->flash_mem, false);
-    //2: Handle chip erase, sector erase etc.
-    //3: Handle responses in flash_read callback
     DPRINTF("%s offset: %08x value: %02x size: %d, cycle: %d\n", __FUNCTION__, (uint32_t)offset, (uint8_t)value, size, s->flash_cycle);
 
     // Reset
@@ -240,7 +247,6 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
 
         s->flash_state = XENIUM_MEMORY_STATE_NORMAL;
         s->flash_cycle = 1;
-        memory_region_rom_device_set_romd(&s->flash_mem, true);
         return;
     }
 
@@ -252,7 +258,6 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
                 DPRINTF("%s Entering CFI Mode flash state\n", __FUNCTION__);
 
                 s->flash_state = XENIUM_MEMORY_STATE_CFI;
-                memory_region_rom_device_set_romd(&s->flash_mem, false);
             }
             else if(offset == 0xAAAA && value == 0xAA && size == 1) {
                 s->flash_cycle++;
@@ -274,7 +279,6 @@ static void flash_write(void *opaque, hwaddr offset, uint64_t value,
                 DPRINTF("%s Entering Autoselect Mode flash state\n", __FUNCTION__);
 
                 s->flash_state = XENIUM_MEMORY_STATE_AUTOSELECT;
-                memory_region_rom_device_set_romd(&s->flash_mem, false);
             }
             else {
                 DPRINTF("%s Unimplemented Flash command\n", __FUNCTION__);
@@ -287,7 +291,7 @@ static const MemoryRegionOps xenium_flash_ops = {
     .read = flash_read,
     .write = flash_write,
     .valid.min_access_size = 1,
-    .valid.max_access_size = 1,
+    .valid.max_access_size = 4,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -320,46 +324,35 @@ static void xenium_realize(DeviceState *dev, Error **errp)
     }
 
     // default state
-    s->bank_control = 1;    // bootloader
-    s->recovery = 1;        // inactive
-    s->led = 1;             // red
+    s->bank_control = 1;                         // bootloader
+    s->recovery = 1;                             // inactive
+    s->led = 1;                                  // red
     s->flash_state = XENIUM_MEMORY_STATE_NORMAL; // Default flash state
-    s->flash_cycle = 1;
+    s->flash_cycle = 1;                          // Flash command cycle tracker
 
-    //Create a ROM device for the Xenuim Flash
-    unsigned int flash_size = XeniumBank[s->bank_control].size;
+    #define ROM_END 0xFFFFFFFF
+    #define ROM_START 0xFF000000
+    #define ROM_AREA (ROM_END - ROM_START - MCPX_SIZE)
 
-    memory_region_init_rom_device(&s->flash_mem, OBJECT(s), &xenium_flash_ops, s,
-        "xenium.bios", XENIUM_MAX_BANK_SIZE, &err);
+    memory_region_init_rom_device(&s->flash_mem, OBJECT(s), &xenium_flash_ops, s, "xenium.bios", ROM_AREA, &err);
+    memory_region_rom_device_set_romd(&s->flash_mem, false);
 
-    void *flash_mem = memory_region_get_ram_ptr(&s->flash_mem);
-
-    //Mirror the flash data over 1MB. This wastes some memory but I always use 1MB as this is the lrgest bank Xenium supports, so I dont have to
-    //keep changing the memory aliases each time the bank size changes.
-    for (int i = 0; i < XENIUM_MAX_BANK_SIZE; i += flash_size)
-    {
-        memcpy(flash_mem + i, xenium_raw + XeniumBank[s->bank_control].offset, flash_size);
-    }
-
-    //Setup memory aliases to mirror the 1MB ROM over the entire Flash ROM mapped region. (0xFF000000 to 0xFFFFFFFF)
-    const uint32_t rom_start = 0xFF000000;
-    uint32_t map_loc;
-    for (map_loc = rom_start; map_loc >= rom_start; map_loc += XENIUM_MAX_BANK_SIZE) {
-        MemoryRegion *mr_bios = g_malloc(sizeof(MemoryRegion));
-        assert(mr_bios != NULL);
-        memory_region_init_alias(mr_bios, NULL, "xenium.bios.alias", &s->flash_mem, 0, XENIUM_MAX_BANK_SIZE);
-        memory_region_add_subregion(rom_memory__, map_loc, mr_bios);
-    }
+    //Setup memory aliases over the entire Flash ROM mapped region. (0xFF000000 to 0xFFFFFFFF)
+    MemoryRegion *mr_bios = g_malloc(sizeof(MemoryRegion));
+    assert(mr_bios != NULL);
+    memory_region_init_alias(mr_bios, NULL, "xenium.bios.alias", &s->flash_mem, 0, ROM_AREA);
+    memory_region_add_subregion(rom_memory__, ROM_START, mr_bios);
 
     //Add MCPX memory and alias it to 0xFFFFFE00 in Xbox memory
+    //FIXME, most of page is not mirrored properly and overlaying the ideal 512bytes is really slow
+    unsigned int page_size = 4096;
     MemoryRegion *mr_mcpx = g_malloc(sizeof(MemoryRegion));
-    memory_region_init_ram(mr_mcpx, NULL, "xbox.mcpx", flash_size, &err);
+    memory_region_init_ram(mr_mcpx, NULL, "xbox.mcpx", page_size, &err);
     void *mcpx_data = memory_region_get_ram_ptr(mr_mcpx);
-    memcpy(mcpx_data, flash_mem, flash_size);
-    memcpy(mcpx_data + flash_size - MCPX_SIZE, mcpx_raw, MCPX_SIZE);
+    memcpy(mcpx_data + page_size - MCPX_SIZE, mcpx_raw, MCPX_SIZE);
     MemoryRegion *mr_mcpx_alias = g_malloc(sizeof(MemoryRegion));
-    memory_region_init_alias(mr_mcpx_alias, NULL, "xbox.mcpx.alias", mr_mcpx, 0, flash_size);
-    memory_region_add_subregion(rom_memory__, -flash_size, mr_mcpx_alias);
+    memory_region_init_alias(mr_mcpx_alias, NULL, "xbox.mcpx.alias", mr_mcpx, 0, page_size);
+    memory_region_add_subregion(rom_memory__, -page_size, mr_mcpx_alias);
 
     //Register Xenium Chip IO
     memory_region_init_io(&s->io, OBJECT(s), &xenium_io_ops, s, "xenium.io", 2);   // 0xEE & 0xEF
