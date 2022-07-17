@@ -2966,12 +2966,6 @@ void qemu_init(int argc, char **argv, char **envp)
     fake_argv[fake_argc++] = strdup("-display");
     fake_argv[fake_argc++] = strdup("xemu");
 
-#ifdef _WIN32
-    // FIXME: Create this dummy device to prevent logspam
-    fake_argv[fake_argc++] = strdup("-audiodev");
-    fake_argv[fake_argc++] = strdup("none,id=snd0");
-#endif
-
     for (int i = 1; i < argc; i++) {
         if (argv[i] != NULL) {
             fake_argv[fake_argc++] = argv[i];
